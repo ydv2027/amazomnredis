@@ -1,0 +1,242 @@
+package amazon_redshift_6;
+
+	import java.io.IOException;
+	import java.nio.file.*;
+	import java.sql.*;
+	import java.util.*;
+
+	public class RedshiftTPCHExecutor {
+
+	    private Connection connection;
+
+	    public static void main(String[] args) throws SQLException {
+	        RedshiftTPCHExecutor executor = new RedshiftTPCHExecutor();
+	        executor.initializeConnection();
+	        executor.dropAllTables();
+	        executor.createTables();
+	        executor.loadData();
+
+	        System.out.println("Query 1 Results:");
+	        System.out.println(formatResult(executor.runQuery1(), 10));
+
+	        System.out.println("\nQuery 2 Results:");
+	        System.out.println(formatResult(executor.runQuery2(), 10));
+
+	        System.out.println("\nQuery 3 Results:");
+	        System.out.println(formatResult(executor.runQuery3(), 10));
+
+	        executor.terminateConnection();
+	    }
+
+	    public void initializeConnection() throws SQLException {
+	        try {
+	            Class.forName("com.amazon.redshift.jdbc.Driver");
+	            connection = DriverManager.getConnection(
+	                "jdbc:redshift://redshift-cluster-1.clhytbtoqpxw.ap-south-1.redshift.amazonaws.com:5439/dev",
+	                "awsuser",
+	                "abhi1234"
+	            );
+	            System.out.println("Connected to Redshift successfully.");
+	        } catch (ClassNotFoundException e) {
+	            throw new SQLException("Redshift driver not found", e);
+	        }
+	    }
+
+	    public void terminateConnection() {
+	        try {
+	            if (connection != null && !connection.isClosed()) {
+	                connection.close();
+	                System.out.println("Disconnected from Redshift.");
+	            }
+	        } catch (SQLException e) {
+	            System.err.println("Disconnection failed: " + e.getMessage());
+	        }
+	    }
+
+	    public void dropAllTables() {
+	        String[] tables = {
+	            "LINEITEM", "ORDERS", "CUSTOMER", "PARTSUPP",
+	            "SUPPLIER", "PART", "NATION", "REGION"
+	        };
+	        try (Statement stmt = connection.createStatement()) {
+	            for (String table : tables) {
+	                String drop = "DROP TABLE IF EXISTS " + table + " CASCADE";
+	                try {
+	                    stmt.execute(drop);
+	                    System.out.println("Dropped table: " + table);
+	                } catch (SQLException e) {
+	                    System.out.println("Error dropping table " + table + ": " + e.getMessage());
+	                }
+	            }
+	        } catch (SQLException e) {
+	            System.err.println("Table dropping failed: " + e.getMessage());
+	        }
+	    }
+
+	    public void createTables() throws SQLException {
+	        String[] ddlStatements = {
+	            // REGION
+	            "CREATE TABLE REGION (R_REGIONKEY INT PRIMARY KEY, R_NAME CHAR(25), R_COMMENT VARCHAR(152))",
+	            // NATION
+	            "CREATE TABLE NATION (N_NATIONKEY INT PRIMARY KEY, N_NAME CHAR(25), N_REGIONKEY BIGINT NOT NULL, N_COMMENT VARCHAR(152))",
+	            // PART
+	            "CREATE TABLE PART (P_PARTKEY INT PRIMARY KEY, P_NAME VARCHAR(55), P_MFGR CHAR(25), P_BRAND CHAR(10), P_TYPE VARCHAR(25), P_SIZE INT, P_CONTAINER CHAR(10), P_RETAILPRICE DECIMAL, P_COMMENT VARCHAR(23))",
+	            // SUPPLIER
+	            "CREATE TABLE SUPPLIER (S_SUPPKEY INT PRIMARY KEY, S_NAME CHAR(25), S_ADDRESS VARCHAR(40), S_NATIONKEY BIGINT NOT NULL, S_PHONE CHAR(15), S_ACCTBAL DECIMAL, S_COMMENT VARCHAR(101))",
+	            // PARTSUPP
+	            "CREATE TABLE PARTSUPP (PS_PARTKEY BIGINT NOT NULL, PS_SUPPKEY BIGINT NOT NULL, PS_AVAILQTY INT, PS_SUPPLYCOST DECIMAL, PS_COMMENT VARCHAR(199), PRIMARY KEY (PS_PARTKEY, PS_SUPPKEY))",
+	            // CUSTOMER
+	            "CREATE TABLE CUSTOMER (C_CUSTKEY INT PRIMARY KEY, C_NAME VARCHAR(25), C_ADDRESS VARCHAR(40), C_NATIONKEY BIGINT NOT NULL, C_PHONE CHAR(15), C_ACCTBAL DECIMAL, C_MKTSEGMENT CHAR(10), C_COMMENT VARCHAR(117))",
+	            // ORDERS
+	            "CREATE TABLE ORDERS (O_ORDERKEY INT PRIMARY KEY, O_CUSTKEY BIGINT NOT NULL, O_ORDERSTATUS CHAR(1), O_TOTALPRICE DECIMAL, O_ORDERDATE DATE, O_ORDERPRIORITY CHAR(15), O_CLERK CHAR(15), O_SHIPPRIORITY INT, O_COMMENT VARCHAR(79))",
+	            // LINEITEM
+	            "CREATE TABLE LINEITEM (L_ORDERKEY BIGINT NOT NULL, L_PARTKEY BIGINT NOT NULL, L_SUPPKEY BIGINT NOT NULL, L_LINENUMBER INT, L_QUANTITY DECIMAL, L_EXTENDEDPRICE DECIMAL, L_DISCOUNT DECIMAL, L_TAX DECIMAL, L_RETURNFLAG CHAR(1), L_LINESTATUS CHAR(1), L_SHIPDATE DATE, L_COMMITDATE DATE, L_RECEIPTDATE DATE, L_SHIPINSTRUCT CHAR(25), L_SHIPMODE CHAR(10), L_COMMENT VARCHAR(44), PRIMARY KEY (L_ORDERKEY, L_LINENUMBER))"
+	        };
+
+	        try (Statement stmt = connection.createStatement()) {
+	            for (String ddl : ddlStatements) {
+	                stmt.execute(ddl);
+	                System.out.println("Table created.");
+	            }
+	        }
+	    }
+
+	    public void loadData() {
+	        String[] files = {
+	            "region.sql", "nation.sql", "part.sql", "supplier.sql",
+	            "partsupp.sql", "customer.sql", "orders.sql", "lineitem.sql"
+	        };
+
+	        try {
+	            connection.setAutoCommit(false);
+
+	            for (String file : files) {
+	                try {
+	                    String content = Files.readString(Paths.get("ddl", file));
+	                    if (content.trim().isEmpty()) continue;
+	                    insertMultiRow(content);
+	                } catch (IOException e) {
+	                    System.err.println("Failed reading file " + file + ": " + e.getMessage());
+	                }
+	            }
+
+	            connection.commit();
+	            connection.setAutoCommit(true);
+	            System.out.println("Data load complete.");
+
+	        } catch (SQLException e) {
+	            System.err.println("Insert failed: " + e.getMessage());
+	        }
+	    }
+
+	    private void insertMultiRow(String sql) throws SQLException {
+	        String[] inserts = sql.split(";\n");
+	        List<String> values = new ArrayList<>();
+	        String table = "";
+
+	        for (String stmt : inserts) {
+	            stmt = stmt.trim();
+	            if (stmt.toUpperCase().startsWith("INSERT INTO")) {
+	                if (table.isEmpty()) {
+	                    int idxStart = stmt.toUpperCase().indexOf("INTO ") + 5;
+	                    int idxEnd = stmt.toUpperCase().indexOf(" VALUES");
+	                    table = stmt.substring(idxStart, idxEnd).trim();
+	                }
+	                int idx = stmt.toUpperCase().indexOf("VALUES");
+	                values.add(stmt.substring(idx + 6).trim());
+	            }
+	        }
+
+	        if (!values.isEmpty()) {
+	            String base = "INSERT INTO " + table + " VALUES ";
+	            int batchSize = values.size() > 1000 ? 1000 : 500;
+	            try (Statement stmt = connection.createStatement()) {
+	                for (int i = 0; i < values.size(); i += batchSize) {
+	                    int end = Math.min(i + batchSize, values.size());
+	                    StringJoiner sj = new StringJoiner(", ");
+	                    for (int j = i; j < end; j++) sj.add(values.get(j));
+	                    stmt.execute(base + sj.toString());
+	                }
+	            }
+	        }
+	    }
+
+	    public ResultSet runQuery1() throws SQLException {
+	        String sql = """
+	            SELECT o.O_ORDERKEY, o.O_TOTALPRICE, o.O_ORDERDATE
+	            FROM ORDERS o
+	            JOIN CUSTOMER c ON o.O_CUSTKEY = c.C_CUSTKEY
+	            JOIN NATION n ON c.C_NATIONKEY = n.N_NATIONKEY
+	            JOIN REGION r ON n.N_REGIONKEY = r.R_REGIONKEY
+	            WHERE r.R_NAME = 'AMERICA'
+	            ORDER BY o.O_ORDERDATE DESC
+	            LIMIT 10
+	        """;
+	        return connection.createStatement().executeQuery(sql);
+	    }
+
+	    public ResultSet runQuery2() throws SQLException {
+	        String sql = """
+	            WITH top_segment AS (
+	                SELECT C_MKTSEGMENT
+	                FROM CUSTOMER
+	                GROUP BY C_MKTSEGMENT
+	                ORDER BY COUNT(*) DESC
+	                LIMIT 1
+	            )
+	            SELECT c.C_CUSTKEY, SUM(o.O_TOTALPRICE) AS total_spent
+	            FROM CUSTOMER c
+	            JOIN ORDERS o ON c.C_CUSTKEY = o.O_CUSTKEY
+	            JOIN NATION n ON c.C_NATIONKEY = n.N_NATIONKEY
+	            JOIN REGION r ON n.N_REGIONKEY = r.R_REGIONKEY
+	            WHERE o.O_ORDERPRIORITY = '1-URGENT'
+	              AND o.O_ORDERSTATUS != 'F'
+	              AND r.R_NAME != 'EUROPE'
+	              AND c.C_MKTSEGMENT = (SELECT C_MKTSEGMENT FROM top_segment)
+	            GROUP BY c.C_CUSTKEY
+	            ORDER BY total_spent DESC
+	        """;
+	        return connection.createStatement().executeQuery(sql);
+	    }
+
+	    public ResultSet runQuery3() throws SQLException {
+	        String sql = """
+	            SELECT o.O_ORDERPRIORITY, COUNT(l.L_LINENUMBER) AS lineitem_count
+	            FROM LINEITEM l
+	            JOIN ORDERS o ON l.L_ORDERKEY = o.O_ORDERKEY
+	            WHERE o.O_ORDERDATE >= '1997-04-01'
+	              AND o.O_ORDERDATE < '2003-04-01'
+	            GROUP BY o.O_ORDERPRIORITY
+	            ORDER BY o.O_ORDERPRIORITY
+	        """;
+	        return connection.createStatement().executeQuery(sql);
+	    }
+
+	    public static String formatResult(ResultSet rs, int maxRows) throws SQLException {
+	        StringBuilder sb = new StringBuilder();
+	        ResultSetMetaData meta = rs.getMetaData();
+	        int cols = meta.getColumnCount();
+
+	        for (int i = 1; i <= cols; i++) {
+	            sb.append(meta.getColumnName(i));
+	            if (i < cols) sb.append(", ");
+	        }
+	        sb.append("\n");
+
+	        int rowCount = 0;
+	        while (rs.next()) {
+	            for (int i = 1; i <= cols; i++) {
+	                sb.append(rs.getString(i));
+	                if (i < cols) sb.append(", ");
+	            }
+	            sb.append("\n");
+	            rowCount++;
+	            if (rowCount >= maxRows) break;
+	        }
+	        sb.append("Total rows shown: ").append(rowCount);
+	        return sb.toString();
+	    }
+	}
+
+
+}
